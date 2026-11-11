@@ -3,7 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0033A0">
+<meta name="theme-color" content="#001E62">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="UK Hoops">
 <title>Kentucky Basketball 2026–27</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230033A0'/%3E%3Cpath d='M32 2v60M2 32h60M12 10c12 10 12 34 0 44M52 10c-12 10-12 34 0 44' stroke='%23fff' stroke-width='3' fill='none'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -232,6 +238,7 @@ table.stats .pl img,table.stats .pl .initials{width:26px;height:26px;border-radi
       <small id="subline">2026–27 season</small>
     </div>
     <div class="sp"></div>
+    <button class="iconbtn" id="installBtn" title="Install app" aria-label="Install app" hidden>⤓</button>
     <button class="iconbtn" id="refreshBtn" title="Refresh live data" aria-label="Refresh live data">⟳</button>
     <button class="iconbtn" id="themeBtn" title="Switch light or dark" aria-label="Switch light or dark">◐</button>
   </div>
@@ -606,7 +613,7 @@ function confRecord(){
   const it = S.team?.record?.items?.find(i => /conf/i.test(i.type||'') || /conf/i.test(i.description||''));
   return it?.summary || '';
 }
-function rank(){ const r = S.team?.rank; return r && r < 26 ? r : (S.events.find(e=>e.usRank)?.usRank || null); }
+function rank(){ const ev = S.events.find(e=>e.state!=='post' && e.usRank) || [...S.events].reverse().find(e=>e.usRank); if(ev) return ev.usRank; const r = S.team?.rank; return r && r < 26 ? r : null; }
 function updateHeader(){
   const r = rank(); const cr = confRecord();
   $('#subline').textContent = `${r ? 'No. '+r+' · ' : ''}${record()}${cr ? ' ('+cr+' SEC)' : ''} · 2026–27`;
@@ -1082,6 +1089,15 @@ $('#themeBtn').addEventListener('click', () => {
 });
 document.addEventListener('visibilitychange', () => { if(!document.hidden && !S.loading) refreshLive(); });
 async function hardRefresh(){ $('#refreshBtn').textContent='…'; await loadBoxScores(true).catch(()=>{}); await refreshLive(); $('#refreshBtn').textContent='⟳'; }
+
+/* Install as an app */
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('#installBtn').hidden = false; });
+window.addEventListener('appinstalled', () => { installEvt = null; $('#installBtn').hidden = true; });
+$('#installBtn').addEventListener('click', async () => { if(!installEvt) return; installEvt.prompt(); await installEvt.userChoice; installEvt = null; $('#installBtn').hidden = true; });
+if('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
 
 (function init(){
   try{ const t = localStorage.getItem('ukmbb27:theme'); if(t) document.documentElement.dataset.theme = t; }catch(e){}
