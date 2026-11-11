@@ -208,6 +208,9 @@ table.stats .pl img,table.stats .pl .initials{width:26px;height:26px;border-radi
 .staff{display:flex;gap:14px;align-items:flex-start}
 .staff .initials{width:52px;height:52px;border-radius:14px;font-size:20px;flex:none}
 .staff .role{font-size:13px;font-weight:700;color:var(--maple-dark)}
+.pos{color:var(--win)} .neg{color:var(--loss)} em.pos,em.neg,.stat em{font-style:normal}
+.gloss summary{cursor:pointer} .gloss dl{margin:10px 0 0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:14px}
+.gloss dt{font-weight:700} .gloss dd{margin:0;color:var(--muted)}
 .empty{text-align:center;padding:30px 12px;color:var(--muted)}
 .updated{font-size:12px;color:var(--muted);text-align:center;margin-top:28px}
 .skel{background:linear-gradient(90deg,var(--surface-2),var(--surface),var(--surface-2));background-size:200% 100%;animation:sh 1.2s infinite;border-radius:14px;height:70px;margin-bottom:8px}
@@ -249,7 +252,7 @@ const API = 'https://site.api.espn.com/apis/site/v2/sports/basketball/mens-colle
 const TEAM_ID = '96';
 const LIVE_MS = 15000;      // live game polling
 const IDLE_MS = 300000;     // normal refresh
-const CACHE_KEY = 'ukmbb27:box:';
+const CACHE_KEY = 'ukmbb27:box2:';
 
 /* ============ BUILT-IN DATA (roster bios, staff, fallback schedule) ============ */
 // path = where the player came from, oldest first (Kentucky added automatically)
@@ -363,7 +366,7 @@ function fallbackEvents(){
   }));
 }
 
-const LABEL_MAP = {MIN:'min',OREB:'oreb',DREB:'dreb',REB:'reb',AST:'ast',STL:'stl',BLK:'blk',TO:'to',PF:'pf',PTS:'pts'};
+const LABEL_MAP = {MIN:'min',OREB:'oreb',DREB:'dreb',REB:'reb',AST:'ast',STL:'stl',BLK:'blk',TO:'to',PF:'pf',PTS:'pts','+/-':'pm'};
 const PAIR_MAP = {FG:['fgm','fga'],'3PT':['tpm','tpa'],FT:['ftm','fta']};
 function statsFrom(labels, vals){
   const o = {min:0,fgm:0,fga:0,tpm:0,tpa:0,ftm:0,fta:0,oreb:0,dreb:0,reb:0,ast:0,stl:0,blk:0,to:0,pf:0,pts:0};
@@ -394,6 +397,8 @@ function parseSummary(sum){
     if(grp.totals && grp.totals.length) tm.totals = statsFrom(labels, grp.totals);
     else { const t = statsFrom([],[]); tm.players.forEach(p=>{ for(const k in t) t[k]+=p[k]||0; }); tm.totals = t; }
   });
+  computePlusMinus(sum.plays || [], teams);
+  teams.forEach(t => { t.ot = Math.max(0, t.lines.length - 2); t.min = 200 + 25*t.ot; });
   const teamStats = [];
   const bt = sum.boxscore?.teams || [];
   if(bt.length === 2){
@@ -411,6 +416,72 @@ function parseSummary(sum){
     state:st.state || 'pre', completed:!!st.completed, detail:st.shortDetail || st.detail || '', teams, teamStats, plays,
     venue:sum.gameInfo?.venue?.fullName || '', attendance:sum.gameInfo?.attendance || null,
     tv:(comp.broadcasts?.[0]?.media?.shortName) || '', updated:Date.now()
+  };
+}
+
+/* Plus/minus: ESPN's college box scores usually don't include it, so it's rebuilt from
+   play-by-play: start with the five starters, follow every substitution, and credit each
+   scoring change to the players on the floor. */
+function computePlusMinus(plays, teams){
+  if(teams.length!==2 || !plays.length) return;
+  if(teams.some(t=>t.players.some(p=>typeof p.pm==='number'))) return; // ESPN supplied it
+  const home = teams.find(t=>t.homeAway==='home'), away = teams.find(t=>t.homeAway==='away');
+  if(!home || !away) return;
+  const find = name => {
+    const k = norm(name);
+    for(const t of teams){
+      let p = t.players.find(x=>norm(x.name)===k);
+      if(!p){ const last = norm(String(name).trim().split(/\s+/).pop()); const c = t.players.filter(x=>norm(String(x.name).split(' ').pop())===last); if(c.length===1) p = c[0]; }
+      if(p) return {t,p};
+    }
+    return null;
+  };
+  const on = new Map(teams.map(t=>[t, new Set(t.players.filter(p=>p.starter).map(p=>p.name))]));
+  teams.forEach(t=>t.players.forEach(p=>{ p._pm = 0; }));
+  const RX = [/^(.+?) enters the game for (.+?)\.?$/i, /^(.+?) subbing in for (.+?)\.?$/i, /^substitution:?\s*(.+?) in for (.+?)\.?$/i, /^(.+?) in for (.+?)\.?$/i];
+  const RXIN = /^(.+?) (?:enters the game|subbing in|checks in)\.?$/i, RXOUT = /^(.+?) (?:goes to the bench|subbing out|exits the game|checks out)\.?$/i;
+  let subs = 0, ph = 0, pa = 0;
+  for(const pl of plays){
+    const txt = String(pl.text||'').trim(); let m = null;
+    for(const r of RX){ m = txt.match(r); if(m) break; }
+    if(m){ const a = find(m[1]), b = find(m[2]); if(a){ on.get(a.t).add(a.p.name); subs++; } if(b) on.get(b.t).delete(b.p.name); }
+    else if((m = txt.match(RXIN))){ const a = find(m[1]); if(a){ on.get(a.t).add(a.p.name); subs++; } }
+    else if((m = txt.match(RXOUT))){ const a = find(m[1]); if(a){ on.get(a.t).delete(a.p.name); subs++; } }
+    if(pl.homeScore!=null && pl.awayScore!=null){
+      const h = num(pl.homeScore), aw = num(pl.awayScore), net = (h-ph) - (aw-pa);
+      if(h!==ph || aw!==pa){
+        home.players.forEach(p=>{ if(on.get(home).has(p.name)) p._pm += net; });
+        away.players.forEach(p=>{ if(on.get(away).has(p.name)) p._pm -= net; });
+        ph = h; pa = aw;
+      }
+    }
+  }
+  const ok = subs >= 2;
+  teams.forEach(t=>t.players.forEach(p=>{ if(ok && !p.dnp) p.pm = p._pm; delete p._pm; }));
+}
+
+/* ============ ADVANCED STAT FORMULAS ============ */
+const poss = t => t ? (t.fga - t.oreb + t.to + 0.475*t.fta) : 0;
+const gameScore = s => s.pts + 0.4*s.fgm - 0.7*s.fga - 0.4*(s.fta-s.ftm) + 0.7*s.oreb + 0.3*s.dreb + s.stl + 0.7*s.ast + 0.7*s.blk - 0.4*s.pf - s.to;
+function advFor(t, A, gp){
+  const m = t.min, tm5 = A.tmin/5, ok = m && A.tmin;
+  return {
+    ts: (t.fga+0.44*t.fta) ? t.pts/(2*(t.fga+0.44*t.fta))*100 : null,
+    efg: t.fga ? (t.fgm+0.5*t.tpm)/t.fga*100 : null,
+    usg: ok && (A.tfga+0.44*A.tfta+A.tto) ? 100*((t.fga+0.44*t.fta+t.to)*tm5)/(m*(A.tfga+0.44*A.tfta+A.tto)) : null,
+    ast: ok && ((m/tm5)*A.tfgm - t.fgm) > 0 ? 100*t.ast/((m/tm5)*A.tfgm - t.fgm) : null,
+    reb: ok && (A.treb+A.otreb) ? 100*(t.reb*tm5)/(m*(A.treb+A.otreb)) : null,
+    orb: ok && (A.toreb+A.odreb) ? 100*(t.oreb*tm5)/(m*(A.toreb+A.odreb)) : null,
+    drb: ok && (A.tdreb+A.ooreb) ? 100*(t.dreb*tm5)/(m*(A.tdreb+A.ooreb)) : null,
+    stl: ok && A.oposs ? 100*(t.stl*tm5)/(m*A.oposs) : null,
+    blk: ok && (A.ofga-A.otpa) ? 100*(t.blk*tm5)/(m*(A.ofga-A.otpa)) : null,
+    tov: (t.fga+0.44*t.fta+t.to) ? 100*t.to/(t.fga+0.44*t.fta+t.to) : null,
+    astto: t.to ? t.ast/t.to : (t.ast ? t.ast : null),
+    tpar: t.fga ? t.tpa/t.fga*100 : null,
+    ftr: t.fga ? t.fta/t.fga*100 : null,
+    gmsc: gp ? A.gs/gp : null,
+    pm: A.pmg ? A.pm : null, pmpg: A.pmg ? A.pm/A.pmg : null,
+    p40: m ? t.pts/m*40 : null, r40: m ? t.reb/m*40 : null, a40: m ? t.ast/m*40 : null
   };
 }
 
@@ -488,13 +559,13 @@ function build(){
     p.id = r.id; p.headshot = r.headshot; if(r.jersey) p.j = String(r.jersey);
     byId.set(r.id, p);
   });
-  const agg = {gp:0,w:0,l:0,us:blank(),them:blank()};
+  const agg = {gp:0,w:0,l:0,tmin:0,us:blank(),them:blank()};
   S.events.forEach(e => {
     const b = S.box[e.id]; if(!b || !b.teams.length) return;
     const ukT = b.teams.find(t=>t.id===TEAM_ID); const opT = b.teams.find(t=>t.id!==TEAM_ID);
     if(!ukT) return;
     if(b.completed){
-      agg.gp++; if(ukT.score>opT?.score) agg.w++; else agg.l++;
+      agg.gp++; agg.tmin += ukT.min||200; if(ukT.score>opT?.score) agg.w++; else agg.l++;
       addTo(agg.us, ukT.totals); addTo(agg.them, opT?.totals);
     }
     ukT.players.forEach(bp => {
@@ -502,13 +573,21 @@ function build(){
       if(!p){ p = {n:bp.name,name:bp.name,key:norm(bp.name),j:bp.jersey,pos:(bp.pos||'').charAt(0),ht:'',cl:'',home:'',path:[],prev:'',note:'',log:[],tot:null,id:bp.id,headshot:bp.headshot,extra:true}; players.push(p); byName.set(p.key,p); if(bp.id) byId.set(bp.id,p); }
       if(!p.headshot && bp.headshot) p.headshot = bp.headshot;
       if(!p.id && bp.id){ p.id = bp.id; byId.set(bp.id,p); }
-      p.log.push({e, b, s:bp, live:!b.completed});
+      p.log.push({e, b, s:bp, live:!b.completed, tm:ukT.totals, op:opT?.totals, tmin:ukT.min||200});
     });
   });
   players.forEach(p => {
     const t = blank(); let gp = 0, gs = 0;
-    p.log.filter(g => !g.s.dnp && g.s.min > 0).forEach(g => { addTo(t, g.s); gp++; if(g.s.starter) gs++; });
+    const A = {tfga:0,tfta:0,tto:0,tfgm:0,treb:0,toreb:0,tdreb:0,otreb:0,ooreb:0,odreb:0,oposs:0,ofga:0,otpa:0,tmin:0,gs:0,pm:0,pmg:0};
+    p.log.forEach(g => { if(!g.s.dnp) g.gmsc = gameScore(g.s); });
+    p.log.filter(g => !g.s.dnp && g.s.min > 0).forEach(g => {
+      addTo(t, g.s); gp++; if(g.s.starter) gs++;
+      A.gs += g.gmsc; if(typeof g.s.pm==='number'){ A.pm += g.s.pm; A.pmg++; }
+      if(g.tm){ A.tfga+=g.tm.fga; A.tfta+=g.tm.fta; A.tto+=g.tm.to; A.tfgm+=g.tm.fgm; A.treb+=g.tm.reb; A.toreb+=g.tm.oreb; A.tdreb+=g.tm.dreb; A.tmin+=g.tmin; }
+      if(g.op){ A.otreb+=g.op.reb; A.ooreb+=g.op.oreb; A.odreb+=g.op.dreb; A.oposs+=poss(g.op); A.ofga+=g.op.fga; A.otpa+=g.op.tpa; }
+    });
     p.tot = {...t, gp, gs};
+    p.adv = advFor(t, A, gp);
     p.ppg = gp ? t.pts/gp : 0; p.rpg = gp ? t.reb/gp : 0; p.apg = gp ? t.ast/gp : 0;
   });
   S.players = players; S.teamAgg = agg;
@@ -726,8 +805,10 @@ function pfmt(p,k){
 function viewStats(){
   let h = `<h2>Stats</h2><div class="toolbar"><div class="seg" role="group" aria-label="Stats type">
     <button aria-pressed="${S.statsMode==='players'}" onclick="S.statsMode='players';render(true)">Players</button>
+    <button aria-pressed="${S.statsMode==='adv'}" onclick="S.statsMode='adv';render(true)">Advanced</button>
     <button aria-pressed="${S.statsMode==='team'}" onclick="S.statsMode='team';render(true)">Team</button></div>
-    <span class="muted small">Per game, from every completed and live game</span></div>`;
+    <span class="muted small">From every completed and live game</span></div>`;
+  if(S.statsMode==='adv') return h + advTable();
   if(S.statsMode==='players'){
     const list = S.players.filter(p=>p.tot?.gp || !p.extra);
     const k = S.statsSort;
@@ -748,6 +829,7 @@ function viewStats(){
     ];
     h += `<div class="panel"><div class="cmp-row" style="margin-bottom:12px"><div class="lbl"><span>Kentucky</span><span>${a.gp} games · ${a.w}-${a.l}</span><span>Opponents</span></div></div>
       <div class="cmp">${rows.map(r=>cmpRow(r[0], (r[1]||0).toFixed(r[3])+(r[4]||''), (r[2]||0).toFixed(r[3])+(r[4]||''), r[1]||0, r[2]||0)).join('')}</div></div>
+      ${teamAdvPanel(a)}
       <h2>Game by game</h2><div class="tablewrap"><table class="stats"><thead><tr><th>Game</th><th>Result</th><th>FG</th><th>3PT</th><th>FT</th><th>REB</th><th>AST</th><th>TO</th><th>STL</th><th>BLK</th></tr></thead><tbody>
       ${S.events.filter(e=>S.box[e.id]?.teams?.length).map(e=>{ const t = S.box[e.id].teams.find(x=>x.id===TEAM_ID)?.totals; if(!t) return '';
         return `<tr><td><button class="pl" onclick="openGame('${e.id}')">${e.homeAway==='away'&&!e.neutral?'at':'vs'} ${esc(e.opp.short)}</button></td><td>${e.state==='in'?'Live':`${(e.win ?? e.us>e.them)?'W':'L'} ${e.us}–${e.them}`}</td>
@@ -755,6 +837,67 @@ function viewStats(){
       </tbody></table></div>`;
   }
   return h;
+}
+const ACOLS = [
+  ['name','Player'],['gp','GP'],['mpg','MIN'],['pm','+/-'],['pmpg','+/- per game'],['gmsc','Game score'],['ts','TS%'],['efg','eFG%'],['usg','USG%'],
+  ['ast','AST%'],['tov','TOV%'],['astto','AST/TO'],['reb','REB%'],['orb','ORB%'],['drb','DRB%'],['stl','STL%'],['blk','BLK%'],
+  ['tpar','3PA rate'],['ftr','FT rate'],['p40','PTS/40'],['r40','REB/40'],['a40','AST/40']
+];
+function aval(p,k){ if(k==='name') return p.name; if(k==='gp') return p.tot.gp; if(k==='mpg') return p.tot.gp ? p.tot.min/p.tot.gp : 0; const v = p.adv?.[k]; return v==null ? -1e9 : v; }
+function afmt(p,k){
+  if(k==='name') return `<button class="pl" onclick="openPlayer('${esc(p.key)}')">${photoHTML(p,'',26)}${esc(p.name)}</button>`;
+  if(k==='gp') return p.tot.gp; if(!p.tot.gp) return '–';
+  if(k==='mpg') return (p.tot.min/p.tot.gp).toFixed(1);
+  const v = p.adv?.[k]; if(v==null || !isFinite(v)) return '–';
+  if(k==='pm') return `<b class="${v>0?'pos':v<0?'neg':''}">${v>0?'+':''}${Math.round(v)}</b>`;
+  if(k==='pmpg') return `<em class="${v>0?'pos':v<0?'neg':''}">${v>0?'+':''}${v.toFixed(1)}</em>`;
+  if(k==='astto') return v.toFixed(2);
+  return v.toFixed(1);
+}
+function advTable(){
+  const list = S.players.filter(p=>p.tot?.gp);
+  if(!list.length) return '<p class="empty">Advanced stats show up here after the first game.</p>';
+  const k = S.advSort || 'gmsc';
+  list.sort((a,b)=> k==='name' ? a.name.localeCompare(b.name) : aval(b,k)-aval(a,k));
+  const anyPM = list.some(p=>p.adv?.pm!=null);
+  let h = `<div class="tablewrap"><table class="stats"><thead><tr>${ACOLS.map(([c,l])=>`<th class="${k===c?'sorted':''}"><button onclick="S.advSort='${c}';render(true)">${l}${k===c?' ▾':''}</button></th>`).join('')}</tr></thead>
+    <tbody>${list.map(p=>`<tr>${ACOLS.map(([c])=>`<td>${afmt(p,c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  if(!anyPM) h += `<p class="small muted">Plus/minus is rebuilt from ESPN’s play-by-play substitutions. It shows a dash when a game’s play-by-play doesn’t list substitutions.</p>`;
+  h += `<details class="panel gloss" style="margin-top:14px"><summary><b>What these mean</b></summary><dl>
+    <dt>+/-</dt><dd>Kentucky’s point margin while he was on the floor (season total, then per game).</dd>
+    <dt>Game score</dt><dd>One-number box score rating per game. About 10 is average, 20+ is a big night.</dd>
+    <dt>TS%</dt><dd>True shooting. Scoring efficiency counting 3s and free throws.</dd>
+    <dt>eFG%</dt><dd>Effective field goal %. Field goal % with 3s worth 1.5 makes.</dd>
+    <dt>USG%</dt><dd>Share of team plays he finished (shot, free throws or turnover) while on the floor.</dd>
+    <dt>AST%</dt><dd>Share of teammates’ made baskets he assisted while on the floor.</dd>
+    <dt>TOV%</dt><dd>Turnovers per 100 of his plays.</dd>
+    <dt>REB%, ORB%, DRB%</dt><dd>Share of available rebounds he grabbed while on the floor.</dd>
+    <dt>STL%, BLK%</dt><dd>Share of opponent possessions ending in his steal, and opponent 2-point tries he blocked.</dd>
+    <dt>3PA rate, FT rate</dt><dd>3-point attempts and free throw attempts per 100 field goal attempts.</dd>
+    <dt>Per 40</dt><dd>Stats scaled to 40 minutes.</dd></dl></details>`;
+  return h;
+}
+function teamAdvPanel(a){
+  const pu = poss(a.us), pt = poss(a.them), P = (pu+pt)/2;
+  const ortg = P ? a.us.pts/P*100 : 0, drtg = P ? a.them.pts/P*100 : 0;
+  const pace = a.tmin ? P/(a.tmin/5)*40 : 0;
+  const ff = t => ({efg:t.fga?(t.fgm+0.5*t.tpm)/t.fga*100:0, tov:(t.fga+0.44*t.fta+t.to)?t.to/(t.fga+0.44*t.fta+t.to)*100:0, ftr:t.fga?t.fta/t.fga*100:0, ts:(t.fga+0.44*t.fta)?t.pts/(2*(t.fga+0.44*t.fta))*100:0, astr:t.fgm?t.ast/t.fgm*100:0});
+  const u = ff(a.us), o = ff(a.them);
+  const orbU = (a.us.oreb+a.them.dreb) ? a.us.oreb/(a.us.oreb+a.them.dreb)*100 : 0, orbO = (a.them.oreb+a.us.dreb) ? a.them.oreb/(a.them.oreb+a.us.dreb)*100 : 0;
+  const net = ortg-drtg;
+  return `<h2>Advanced</h2><div class="grid g4">
+    ${glance(ortg.toFixed(1),'Offensive rating')}${glance(drtg.toFixed(1),'Defensive rating')}
+    ${glance(`<em class="${net>0?'pos':net<0?'neg':''}">${net>0?'+':''}${net.toFixed(1)}</em>`,'Net rating')}${glance(pace.toFixed(1),'Pace (possessions per 40)')}</div>
+    <p class="small muted" style="margin:8px 0 14px">Ratings are points per 100 possessions.</p>
+    <div class="panel"><div class="cmp-row" style="margin-bottom:12px"><div class="lbl"><span>Kentucky</span><span>Four factors and more</span><span>Opponents</span></div></div><div class="cmp">
+    ${cmpRow('Effective FG %',u.efg.toFixed(1),o.efg.toFixed(1),u.efg,o.efg)}
+    ${cmpRow('True shooting %',u.ts.toFixed(1),o.ts.toFixed(1),u.ts,o.ts)}
+    ${cmpRow('Turnover % (lower is better)',u.tov.toFixed(1),o.tov.toFixed(1),u.tov,o.tov)}
+    ${cmpRow('Offensive rebound %',orbU.toFixed(1),orbO.toFixed(1),orbU,orbO)}
+    ${cmpRow('Free throw rate',u.ftr.toFixed(1),o.ftr.toFixed(1),u.ftr,o.ftr)}
+    ${cmpRow('Assist rate (assisted baskets %)',u.astr.toFixed(1),o.astr.toFixed(1),u.astr,o.astr)}
+    ${cmpRow('Possessions per game',(pu/a.gp).toFixed(1),(pt/a.gp).toFixed(1),pu,pt)}
+    </div></div>`;
 }
 function cmpRow(label, a, b, av, bv){
   const tot = (num(av)+num(bv)) || 1;
@@ -808,6 +951,7 @@ function playerSheet(key){
    ${p.note?`<p class="small" style="margin:4px 0 0">${esc(p.note)}</p>`:''}
    <h3 style="margin-top:18px">2026–27 ${g?`· ${g} game${g>1?'s':''}${t.gs?`, ${t.gs} start${t.gs>1?'s':''}`:''}`:''}</h3>
    ${g ? `<div class="statgrid">${statBoxes.map(s=>`<div class="stat"><b>${s[0]}</b><span>${s[1]}</span></div>`).join('')}</div>
+     <h3 style="margin-top:16px">Advanced</h3><div class="statgrid">${[['pm','+/-'],['pmpg','+/- per game'],['gmsc','Game score'],['ts','TS%'],['efg','eFG%'],['usg','USG%'],['ast','AST%'],['reb','REB%'],['astto','AST/TO'],['p40','PTS/40']].map(([k,l])=>`<div class="stat"><b>${afmt(p,k)}</b><span>${l}</span></div>`).join('')}</div>
      <p class="small muted" style="margin:8px 0 0">Totals: ${t.pts} pts · ${t.reb} reb · ${t.ast} ast · ${t.fgm}-${t.fga} FG · ${t.tpm}-${t.tpa} 3PT · ${t.ftm}-${t.fta} FT</p>`
      : '<p class="muted small">No game stats yet.</p>'}
    <h3 style="margin-top:18px">Highlights</h3>
@@ -818,11 +962,11 @@ function playerSheet(key){
      <a class="btn xbtn" href="${xs(p.name+' Kentucky')}" target="_blank" rel="noopener">Latest on X</a>
      ${p.id?`<a class="btn" href="https://www.espn.com/mens-college-basketball/player/_/id/${p.id}" target="_blank" rel="noopener">ESPN profile</a>`:''}
    </div>
-   ${log.length ? `<h3 style="margin-top:18px">Game log</h3><div class="tablewrap"><table class="stats"><thead><tr><th>Game</th><th>MIN</th><th>PTS</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th><th>TO</th><th>FG</th><th>3PT</th><th>FT</th></tr></thead><tbody>
+   ${log.length ? `<h3 style="margin-top:18px">Game log</h3><div class="tablewrap"><table class="stats"><thead><tr><th>Game</th><th>MIN</th><th>PTS</th><th>+/-</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th><th>TO</th><th>FG</th><th>3PT</th><th>FT</th><th>GmSc</th></tr></thead><tbody>
      ${log.map(L=>{ const s = L.s, e = L.e;
        const res = L.live ? 'Live' : `${(e.win ?? e.us>e.them)?'W':'L'}`;
        return `<tr class="${s.dnp?'dnp':''}"><td><button class="pl" onclick="openGame('${e.id}')">${shortDate(e.date).replace(/^\w+, /,'')} ${e.homeAway==='away'&&!e.neutral?'at':'vs'} ${esc(e.opp.abbr||e.opp.short)} <span class="muted">${res}</span></button></td>
-         ${s.dnp ? '<td colspan="10" style="text-align:left">Did not play</td>' : `<td>${s.min}</td><td><b>${s.pts}</b></td><td>${s.reb}</td><td>${s.ast}</td><td>${s.stl}</td><td>${s.blk}</td><td>${s.to}</td><td>${s.fgm}-${s.fga}</td><td>${s.tpm}-${s.tpa}</td><td>${s.ftm}-${s.fta}</td>`}</tr>`; }).join('')}
+         ${s.dnp ? '<td colspan="12" style="text-align:left">Did not play</td>' : `<td>${s.min}</td><td><b>${s.pts}</b></td><td class="${s.pm>0?'pos':s.pm<0?'neg':''}">${typeof s.pm==='number'?(s.pm>0?'+':'')+s.pm:'–'}</td><td>${s.reb}</td><td>${s.ast}</td><td>${s.stl}</td><td>${s.blk}</td><td>${s.to}</td><td>${s.fgm}-${s.fga}</td><td>${s.tpm}-${s.tpa}</td><td>${s.ftm}-${s.fta}</td><td>${L.gmsc!=null?L.gmsc.toFixed(1):'–'}</td>`}</tr>`; }).join('')}
    </tbody></table></div>` : ''}`;
   return {title:p.name, html};
 }
@@ -836,11 +980,14 @@ function boxTable(team, isUK){
     return known ? `<button class="pl" onclick="openPlayer('${esc(known.key)}')">${inner}</button>` : `<span class="pl">${inner}</span>`;
   };
   const t = team.totals || blank();
-  return `<div class="tablewrap"><table class="stats"><thead><tr><th>Player</th><th>MIN</th><th>PTS</th><th>FG</th><th>3PT</th><th>FT</th><th>OREB</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th><th>TO</th><th>PF</th></tr></thead><tbody>
-   ${rows.map(p=>`<tr class="${p.dnp?'dnp':''}"><td>${nameCell(p)}</td>${p.dnp?'<td colspan="12" style="text-align:left">Did not play</td>':
-     `<td>${p.min}</td><td><b>${p.pts}</b></td><td>${p.fgm}-${p.fga}</td><td>${p.tpm}-${p.tpa}</td><td>${p.ftm}-${p.fta}</td><td>${p.oreb}</td><td>${p.reb}</td><td>${p.ast}</td><td>${p.stl}</td><td>${p.blk}</td><td>${p.to}</td><td>${p.pf}</td>`}</tr>`).join('')}
-   <tr class="tot"><td>Team</td><td></td><td>${t.pts}</td><td>${t.fgm}-${t.fga}</td><td>${t.tpm}-${t.tpa}</td><td>${t.ftm}-${t.fta}</td><td>${t.oreb}</td><td>${t.reb}</td><td>${t.ast}</td><td>${t.stl}</td><td>${t.blk}</td><td>${t.to}</td><td>${t.pf}</td></tr>
-   <tr class="tot"><td>Shooting</td><td></td><td></td><td>${pct(t.fgm,t.fga)}%</td><td>${pct(t.tpm,t.tpa)}%</td><td>${pct(t.ftm,t.fta)}%</td><td colspan="7"></td></tr>
+  const hasPM = team.players.some(p=>typeof p.pm==='number');
+  const pmCell = p => hasPM ? `<td><b class="${p.pm>0?'pos':p.pm<0?'neg':''}">${typeof p.pm==='number'?(p.pm>0?'+':'')+p.pm:'–'}</b></td>` : '';
+  const ts = p => (p.fga+0.44*p.fta) ? (p.pts/(2*(p.fga+0.44*p.fta))*100).toFixed(0) : '–';
+  return `<div class="tablewrap"><table class="stats"><thead><tr><th>Player</th><th>MIN</th><th>PTS</th>${hasPM?'<th>+/-</th>':''}<th>FG</th><th>3PT</th><th>FT</th><th>OREB</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th><th>TO</th><th>PF</th><th>TS%</th><th>GmSc</th></tr></thead><tbody>
+   ${rows.map(p=>`<tr class="${p.dnp?'dnp':''}"><td>${nameCell(p)}</td>${p.dnp?`<td colspan="${hasPM?15:14}" style="text-align:left">Did not play</td>`:
+     `<td>${p.min}</td><td><b>${p.pts}</b></td>${pmCell(p)}<td>${p.fgm}-${p.fga}</td><td>${p.tpm}-${p.tpa}</td><td>${p.ftm}-${p.fta}</td><td>${p.oreb}</td><td>${p.reb}</td><td>${p.ast}</td><td>${p.stl}</td><td>${p.blk}</td><td>${p.to}</td><td>${p.pf}</td><td>${ts(p)}</td><td>${gameScore(p).toFixed(1)}</td>`}</tr>`).join('')}
+   <tr class="tot"><td>Team</td><td></td><td>${t.pts}</td>${hasPM?'<td></td>':''}<td>${t.fgm}-${t.fga}</td><td>${t.tpm}-${t.tpa}</td><td>${t.ftm}-${t.fta}</td><td>${t.oreb}</td><td>${t.reb}</td><td>${t.ast}</td><td>${t.stl}</td><td>${t.blk}</td><td>${t.to}</td><td>${t.pf}</td><td>${ts(t)}</td><td></td></tr>
+   <tr class="tot"><td>Shooting</td><td></td><td></td>${hasPM?'<td></td>':''}<td>${pct(t.fgm,t.fga)}%</td><td>${pct(t.tpm,t.tpa)}%</td><td>${pct(t.ftm,t.fta)}%</td><td colspan="9"></td></tr>
   </tbody></table></div>`;
 }
 function gameSheet(id, tab){
@@ -876,6 +1023,20 @@ function gameSheet(id, tab){
       rows = [['FG %',pct(u.fgm,u.fga),pct(o.fgm,o.fga)],['3PT %',pct(u.tpm,u.tpa),pct(o.tpm,o.tpa)],['FT %',pct(u.ftm,u.fta),pct(o.ftm,o.fta)],
         ['Rebounds',u.reb,o.reb],['Offensive rebounds',u.oreb,o.oreb],['Assists',u.ast,o.ast],['Steals',u.stl,o.stl],['Blocks',u.blk,o.blk],['Turnovers',u.to,o.to],['Fouls',u.pf,o.pf]]
         .map(r=>({label:r[0],us:String(r[1]),them:String(r[2])}));
+    }
+    if(uk?.totals && op?.totals){
+      const u = uk.totals, o = op.totals, P = (poss(u)+poss(o))/2;
+      const efg = t => t.fga ? ((t.fgm+0.5*t.tpm)/t.fga*100).toFixed(1) : '0';
+      const tov = t => (t.fga+0.44*t.fta+t.to) ? (t.to/(t.fga+0.44*t.fta+t.to)*100).toFixed(1) : '0';
+      const orb = (a,b) => (a.oreb+b.dreb) ? (a.oreb/(a.oreb+b.dreb)*100).toFixed(1) : '0';
+      rows = rows.concat([
+        {label:'Possessions', us:poss(u).toFixed(0), them:poss(o).toFixed(0)},
+        {label:'Points per 100 possessions', us:P?(u.pts/P*100).toFixed(1):'0', them:P?(o.pts/P*100).toFixed(1):'0'},
+        {label:'Effective FG %', us:efg(u), them:efg(o)},
+        {label:'Turnover %', us:tov(u), them:tov(o)},
+        {label:'Offensive rebound %', us:orb(u,o), them:orb(o,u)},
+        {label:'Free throw rate', us:u.fga?(u.fta/u.fga*100).toFixed(1):'0', them:o.fga?(o.fta/o.fga*100).toFixed(1):'0'}
+      ]);
     }
     html += `<div class="panel"><div class="cmp-row" style="margin-bottom:12px"><div class="lbl"><span>Kentucky</span><span></span><span>${esc(op?.short||e.opp.short)}</span></div></div>
       <div class="cmp">${rows.map(r=>cmpRow(r.label, r.us, r.them, num(r.us), num(r.them))).join('') || '<p class="muted small">Team stats aren’t available yet.</p>'}</div></div>`;
